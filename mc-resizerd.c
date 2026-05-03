@@ -788,7 +788,12 @@ static bool activate_window(App *app, Window window) {
     if (window == None) {
         return false;
     }
-    XMapRaised(app->display, window);
+    Window frame = direct_child_of_root(app, window);
+    if (frame != None && frame != window) {
+        XMapRaised(app->display, frame);
+    } else {
+        XMapRaised(app->display, window);
+    }
 
     XEvent ev;
     memset(&ev, 0, sizeof(ev));
@@ -1161,6 +1166,12 @@ static bool set_mode(App *app, Mode mode) {
     target_rect(app, mode, &x, &y, &w, &h);
 
     ensure_window_mapped(app);
+    if (!target_has_focus(app)) {
+        activate_window(app, app->target);
+        focus_window_direct(app, app->target);
+        XFlush(app->display);
+        sleep_ms(app->config.refresh_delay_ms);
+    }
     update_geometry(app);
 
     if (mode != MODE_FULL) {
@@ -1180,6 +1191,9 @@ static bool set_mode(App *app, Mode mode) {
             wait_for_fullscreen_removed(app);
         }
         post_resize_refresh(app);
+        activate_window(app, app->target);
+        focus_window_direct(app, app->target);
+        XFlush(app->display);
         app->last_x = x;
         app->last_y = y;
         app->last_w = w;
