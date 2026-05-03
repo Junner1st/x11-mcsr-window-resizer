@@ -812,6 +812,22 @@ static bool activate_window(App *app, Window window) {
                       &ev) != 0;
 }
 
+static bool focus_window_direct(App *app, Window window) {
+    if (window == None) {
+        return false;
+    }
+
+    XWindowAttributes attr;
+    if (!XGetWindowAttributes(app->display, window, &attr) ||
+        attr.map_state != IsViewable ||
+        attr.class != InputOutput) {
+        return false;
+    }
+
+    XSetInputFocus(app->display, window, RevertToPointerRoot, CurrentTime);
+    return true;
+}
+
 static bool window_has_atom_property(App *app, Window window, Atom property, Atom needle) {
     Atom actual_type;
     int actual_format;
@@ -1103,10 +1119,12 @@ static void send_focus_bounce_refresh(App *app) {
 
     bool target_was_focused = target_has_focus(app);
     activate_window(app, peer);
+    focus_window_direct(app, peer);
     XFlush(app->display);
     sleep_ms(app->config.refresh_delay_ms);
 
     activate_window(app, app->target);
+    focus_window_direct(app, app->target);
     XFlush(app->display);
     if (target_was_focused) {
         sleep_ms(app->config.refresh_delay_ms);
@@ -1116,43 +1134,13 @@ static void send_focus_bounce_refresh(App *app) {
     XFlush(app->display);
 }
 
-static bool mode_spans_monitor_height(App *app, Mode mode) {
-    unsigned int h;
-    int dh;
-    switch (mode) {
-    case MODE_THIN:
-        h = app->config.thin_h;
-        break;
-    case MODE_WIDE:
-        h = app->config.wide_h;
-        break;
-    case MODE_FULL:
-    default:
-        h = app->config.monitor_h;
-        break;
-    }
-    dh = (int)h - (int)app->config.monitor_h;
-    if (dh < 0) {
-        dh = -dh;
-    }
-    return dh <= GEOMETRY_TOLERANCE;
-}
-
-static void post_resize_refresh(App *app, Mode mode) {
+static void post_resize_refresh(App *app) {
     switch (app->config.refresh) {
     case REFRESH_EXPOSE:
         send_expose_refresh(app);
         break;
     case REFRESH_FOCUS_BOUNCE:
-        if (mode_spans_monitor_height(app, mode) ||
-            window_has_atom_property(app,
-                                     app->target,
-                                     app->net_wm_state,
-                                     app->net_wm_state_fullscreen)) {
-            send_expose_refresh(app);
-        } else {
-            send_focus_bounce_refresh(app);
-        }
+        send_focus_bounce_refresh(app);
         break;
     case REFRESH_NONE:
     default:
@@ -1191,7 +1179,7 @@ static bool set_mode(App *app, Mode mode) {
             XFlush(app->display);
             wait_for_fullscreen_removed(app);
         }
-        post_resize_refresh(app, mode);
+        post_resize_refresh(app);
         app->last_x = x;
         app->last_y = y;
         app->last_w = w;
