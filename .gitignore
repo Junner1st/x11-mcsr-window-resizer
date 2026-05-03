@@ -1,0 +1,13 @@
+# Build outputs
+mc-resizerd
+mc-resizerctl
+*.o
+
+# Local rollback/debug snapshots
+/.rollback-*/
+
+# Editor and OS noise
+*~
+*.swp
+*.swo
+.DS_Store
