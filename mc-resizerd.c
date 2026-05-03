@@ -1211,9 +1211,9 @@ static Command command_from_name(const char *name) {
 static Mode mode_for_command(App *app, Command command) {
     switch (command) {
     case CMD_THIN:
-        return MODE_THIN;
+        return app->current_mode == MODE_THIN ? MODE_FULL : MODE_THIN;
     case CMD_WIDE:
-        return MODE_WIDE;
+        return app->current_mode == MODE_WIDE ? MODE_FULL : MODE_WIDE;
     case CMD_FULL:
         return MODE_FULL;
     case CMD_CYCLE:
@@ -1234,6 +1234,7 @@ static Mode mode_for_command(App *app, Command command) {
 }
 
 static bool run_command(App *app, Command command) {
+    update_geometry(app);
     Mode target = mode_for_command(app, command);
     if (target == MODE_UNKNOWN) {
         return false;
