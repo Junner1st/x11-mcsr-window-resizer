@@ -7,6 +7,15 @@ Low-latency X11 window resizer for switching a target window between fixed
 This is inspired by [linux-mcsr-resizer](https://github.com/nafetss/linux-mcsr-resizer) from [nafetss](https://github.com/nafetss). But instead of a shell script, this use systemctl service to improve performance and try to fix some bugs.
 
 
+## Functions
+
+1. Centering
+    ![centering](./static/gif/centering.GIF)
+
+2. window resize: thin/wide mode
+    > not yet clip
+
+
 ## Configure
 
 Edit `mc-resizer.conf`.
