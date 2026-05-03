@@ -2,6 +2,9 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
+#include "mc-centering.h"
+#include "mc-overlay.h"
+
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -23,14 +26,15 @@
 #endif
 
 #define MAX_PATTERNS 16
-#define MAX_BINDINGS 4
+#define MAX_BINDINGS 5
 #define GEOMETRY_TOLERANCE 80
 
 typedef enum {
     MODE_UNKNOWN = 0,
     MODE_FULL,
     MODE_THIN,
-    MODE_WIDE
+    MODE_WIDE,
+    MODE_CENTER
 } Mode;
 
 typedef enum {
@@ -49,7 +53,8 @@ typedef enum {
     CMD_THIN,
     CMD_WIDE,
     CMD_FULL,
-    CMD_CYCLE
+    CMD_CYCLE,
+    CMD_CENTER
 } Command;
 
 typedef struct {
@@ -70,6 +75,8 @@ typedef struct {
     char key_wide[64];
     char key_full[64];
     char key_cycle[64];
+    char key_measurement_screen_toggle[64];
+    double measurement_center_screen;
     char *title_patterns[MAX_PATTERNS];
     int title_pattern_count;
     char *class_patterns[MAX_PATTERNS];
@@ -81,7 +88,9 @@ typedef struct {
     Command command;
     char spec[64];
     KeyCode keycode;
+    KeyCode prefix_keycode;
     unsigned int modifiers;
+    bool prefix_down;
 } Binding;
 
 typedef struct {
@@ -111,6 +120,8 @@ typedef struct {
     int binding_count;
     Config config;
     int listen_fd;
+    McOverlay overlay;
+    long next_overlay_paint_ms;
     bool verbose;
     int x_error_count;
 } App;
@@ -247,6 +258,11 @@ static void config_defaults(Config *cfg) {
     snprintf(cfg->key_wide, sizeof(cfg->key_wide), "%s", "Ctrl+Alt+2");
     snprintf(cfg->key_full, sizeof(cfg->key_full), "%s", "Ctrl+Alt+3");
     snprintf(cfg->key_cycle, sizeof(cfg->key_cycle), "%s", "Ctrl+Alt+4");
+    snprintf(cfg->key_measurement_screen_toggle,
+             sizeof(cfg->key_measurement_screen_toggle),
+             "%s",
+             "grave+Tab");
+    cfg->measurement_center_screen = 0.3;
     split_patterns(cfg->title_patterns, &cfg->title_pattern_count, "Minecraft,MCSR");
     split_patterns(cfg->class_patterns, &cfg->class_pattern_count, "Minecraft,GLFW,java");
 }
@@ -343,6 +359,14 @@ static void load_config(Config *cfg, const char *path) {
             snprintf(cfg->key_full, sizeof(cfg->key_full), "%s", value);
         } else if (strcmp(key, "key_cycle") == 0) {
             snprintf(cfg->key_cycle, sizeof(cfg->key_cycle), "%s", value);
+        } else if (strcmp(key, "key_measurement_screen_toggle") == 0) {
+            snprintf(cfg->key_measurement_screen_toggle,
+                     sizeof(cfg->key_measurement_screen_toggle),
+                     "%s",
+                     value);
+        } else if (strcmp(key, "measurement_center_screen") == 0) {
+            cfg->measurement_center_screen =
+                mc_centering_sanitize_ratio(strtod(value, NULL), cfg->measurement_center_screen);
         } else if (strcmp(key, "title_match") == 0) {
             clear_patterns(cfg, true);
             split_patterns(cfg->title_patterns, &cfg->title_pattern_count, value);
@@ -363,6 +387,8 @@ static const char *mode_name(Mode mode) {
         return "thin";
     case MODE_WIDE:
         return "wide";
+    case MODE_CENTER:
+        return "center";
     default:
         return "unknown";
     }
@@ -714,6 +740,42 @@ static bool ensure_target(App *app) {
         app->current_mode = MODE_UNKNOWN;
     }
     return find_target_window(app);
+}
+
+static bool window_root_rect(App *app,
+                             Window window,
+                             int *x,
+                             int *y,
+                             unsigned int *w,
+                             unsigned int *h) {
+    if (window == None) {
+        return false;
+    }
+
+    XWindowAttributes attr;
+    if (!XGetWindowAttributes(app->display, window, &attr)) {
+        return false;
+    }
+
+    Window child;
+    int root_x = 0;
+    int root_y = 0;
+    if (!XTranslateCoordinates(app->display,
+                               window,
+                               app->root,
+                               0,
+                               0,
+                               &root_x,
+                               &root_y,
+                               &child)) {
+        return false;
+    }
+
+    *x = root_x;
+    *y = root_y;
+    *w = (unsigned int)attr.width;
+    *h = (unsigned int)attr.height;
+    return true;
 }
 
 static void target_rect(App *app, Mode mode, int *x, int *y, unsigned int *w, unsigned int *h) {
@@ -1153,6 +1215,103 @@ static void post_resize_refresh(App *app) {
     }
 }
 
+static void hide_center_overlay(App *app) {
+    if (mc_overlay_visible(&app->overlay)) {
+        mc_overlay_hide(&app->overlay);
+        update_geometry(app);
+    }
+}
+
+static bool center_overlay_rect(App *app, int *x, int *y, unsigned int *w, unsigned int *h) {
+    Window base = app->frame != None ? app->frame : app->target;
+    if (window_root_rect(app, base, x, y, w, h)) {
+        return true;
+    }
+
+    *x = app->config.monitor_x;
+    *y = app->config.monitor_y;
+    *w = app->config.monitor_w;
+    *h = app->config.monitor_h;
+    return *w > 0 && *h > 0;
+}
+
+static bool paint_center_overlay(App *app) {
+    if (!mc_overlay_visible(&app->overlay) || app->target == None) {
+        return false;
+    }
+
+    XWindowAttributes attr;
+    if (!XGetWindowAttributes(app->display, app->target, &attr) ||
+        attr.width <= 0 ||
+        attr.height <= 0) {
+        return false;
+    }
+
+    McCenteringRect source_rect;
+    if (!mc_centering_source_rect(0,
+                                  0,
+                                  (unsigned int)attr.width,
+                                  (unsigned int)attr.height,
+                                  app->config.measurement_center_screen,
+                                  &source_rect)) {
+        return false;
+    }
+
+    int x;
+    int y;
+    unsigned int w;
+    unsigned int h;
+    if (center_overlay_rect(app, &x, &y, &w, &h)) {
+        mc_overlay_show(&app->overlay, x, y, w, h);
+    }
+
+    mc_overlay_raise(&app->overlay);
+    return mc_overlay_paint(&app->overlay, app->target, &source_rect);
+}
+
+static bool show_center_overlay(App *app) {
+    if (!ensure_target(app)) {
+        log_msg("no matching target window");
+        return false;
+    }
+
+    int x;
+    int y;
+    unsigned int w;
+    unsigned int h;
+    if (!center_overlay_rect(app, &x, &y, &w, &h)) {
+        return false;
+    }
+
+    if (!mc_overlay_show(&app->overlay, x, y, w, h)) {
+        return false;
+    }
+
+    bool ok = paint_center_overlay(app);
+    app->current_mode = MODE_CENTER;
+    app->next_overlay_paint_ms = monotonic_ms() + 33;
+    if (app->verbose) {
+        log_msg("show center overlay window=0x%lx target=0x%lx geometry=%ux%u+%d+%d ratio=%.3f click-through=%s",
+                mc_overlay_window(&app->overlay),
+                app->target,
+                w,
+                h,
+                x,
+                y,
+                app->config.measurement_center_screen,
+                app->overlay.shape_input_available ? "yes" : "no");
+    }
+    return ok;
+}
+
+static bool toggle_center_overlay(App *app) {
+    if (mc_overlay_visible(&app->overlay)) {
+        hide_center_overlay(app);
+        return true;
+    }
+    return show_center_overlay(app);
+}
+
 static bool set_mode(App *app, Mode mode) {
     if (!ensure_target(app)) {
         log_msg("no matching target window");
@@ -1219,6 +1378,9 @@ static Command command_from_name(const char *name) {
     if (strcmp(name, "cycle") == 0) {
         return CMD_CYCLE;
     }
+    if (strcmp(name, "center") == 0 || strcmp(name, "measurement-center") == 0) {
+        return CMD_CENTER;
+    }
     return CMD_NONE;
 }
 
@@ -1230,6 +1392,8 @@ static Mode mode_for_command(App *app, Command command) {
         return app->current_mode == MODE_WIDE ? MODE_FULL : MODE_WIDE;
     case CMD_FULL:
         return MODE_FULL;
+    case CMD_CENTER:
+        return app->current_mode == MODE_CENTER ? MODE_FULL : MODE_CENTER;
     case CMD_CYCLE:
         switch (app->current_mode) {
         case MODE_FULL:
@@ -1248,6 +1412,11 @@ static Mode mode_for_command(App *app, Command command) {
 }
 
 static bool run_command(App *app, Command command) {
+    if (command == CMD_CENTER) {
+        return toggle_center_overlay(app);
+    }
+
+    hide_center_overlay(app);
     update_geometry(app);
     Mode target = mode_for_command(app, command);
     if (target == MODE_UNKNOWN) {
@@ -1277,7 +1446,30 @@ static unsigned int find_numlock_mask(Display *display) {
     return numlock;
 }
 
-static bool parse_key_spec(App *app, const char *spec, KeyCode *keycode, unsigned int *modifiers) {
+static bool keysym_from_token(const char *token, KeySym *sym_out) {
+    KeySym sym = XStringToKeysym(token);
+    if (sym == NoSymbol && strlen(token) == 1) {
+        char one[2] = {(char)tolower((unsigned char)token[0]), '\0'};
+        sym = XStringToKeysym(one);
+    }
+    if (sym == NoSymbol && strcasecmp(token, "grave") == 0) {
+        sym = XK_grave;
+    }
+    if (sym == NoSymbol && strcmp(token, "`") == 0) {
+        sym = XK_grave;
+    }
+    if (sym == NoSymbol) {
+        return false;
+    }
+    *sym_out = sym;
+    return true;
+}
+
+static bool parse_key_spec(App *app,
+                           const char *spec,
+                           KeyCode *keycode,
+                           KeyCode *prefix_keycode,
+                           unsigned int *modifiers) {
     char buf[128];
     snprintf(buf, sizeof(buf), "%s", spec);
     trim(buf);
@@ -1286,7 +1478,8 @@ static bool parse_key_spec(App *app, const char *spec, KeyCode *keycode, unsigne
     }
 
     unsigned int mods = 0;
-    char *last = NULL;
+    char *keys[2] = {NULL, NULL};
+    int key_count = 0;
     char *save = NULL;
     for (char *tok = strtok_r(buf, "+", &save); tok; tok = strtok_r(NULL, "+", &save)) {
         trim(tok);
@@ -1309,20 +1502,20 @@ static bool parse_key_spec(App *app, const char *spec, KeyCode *keycode, unsigne
         } else if (strcasecmp(tok, "Mod5") == 0) {
             mods |= Mod5Mask;
         } else {
-            last = tok;
+            if (key_count >= 2) {
+                log_msg("too many non-modifier keys in hotkey spec: %s", spec);
+                return false;
+            }
+            keys[key_count++] = tok;
         }
     }
 
-    if (!last) {
+    if (key_count == 0) {
         return false;
     }
 
-    KeySym sym = XStringToKeysym(last);
-    if (sym == NoSymbol && strlen(last) == 1) {
-        char one[2] = {(char)tolower((unsigned char)last[0]), '\0'};
-        sym = XStringToKeysym(one);
-    }
-    if (sym == NoSymbol) {
+    KeySym sym;
+    if (!keysym_from_token(keys[key_count - 1], &sym)) {
         log_msg("unknown key in hotkey spec: %s", spec);
         return false;
     }
@@ -1333,7 +1526,22 @@ static bool parse_key_spec(App *app, const char *spec, KeyCode *keycode, unsigne
         return false;
     }
 
+    KeyCode prefix_code = 0;
+    if (key_count == 2) {
+        KeySym prefix_sym;
+        if (!keysym_from_token(keys[0], &prefix_sym)) {
+            log_msg("unknown prefix key in hotkey spec: %s", spec);
+            return false;
+        }
+        prefix_code = XKeysymToKeycode(app->display, prefix_sym);
+        if (prefix_code == 0) {
+            log_msg("no prefix keycode for hotkey spec: %s", spec);
+            return false;
+        }
+    }
+
     *keycode = code;
+    *prefix_keycode = prefix_code;
     *modifiers = mods;
     return true;
 }
@@ -1353,7 +1561,11 @@ static void add_binding(App *app, const char *name, Command command, const char 
     binding->command = command;
     snprintf(binding->spec, sizeof(binding->spec), "%s", spec);
 
-    if (!parse_key_spec(app, spec, &binding->keycode, &binding->modifiers)) {
+    if (!parse_key_spec(app,
+                        spec,
+                        &binding->keycode,
+                        &binding->prefix_keycode,
+                        &binding->modifiers)) {
         return;
     }
 
@@ -1365,7 +1577,8 @@ static void add_binding(App *app, const char *name, Command command, const char 
     };
     for (size_t i = 0; i < sizeof(variants) / sizeof(variants[0]); i++) {
         int before = app->x_error_count;
-        grab_one(app->display, app->root, binding->keycode, binding->modifiers | variants[i]);
+        KeyCode grab_keycode = binding->prefix_keycode ? binding->prefix_keycode : binding->keycode;
+        grab_one(app->display, app->root, grab_keycode, binding->modifiers | variants[i]);
         XSync(app->display, False);
         if (app->x_error_count != before) {
             log_msg("failed to grab %s variant modifiers=0x%x; another client may already own it",
@@ -1383,6 +1596,10 @@ static void setup_hotkeys(App *app) {
     add_binding(app, "wide", CMD_WIDE, app->config.key_wide);
     add_binding(app, "full", CMD_FULL, app->config.key_full);
     add_binding(app, "cycle", CMD_CYCLE, app->config.key_cycle);
+    add_binding(app,
+                "measurement-center",
+                CMD_CENTER,
+                app->config.key_measurement_screen_toggle);
     XSync(app->display, False);
 }
 
@@ -1391,11 +1608,33 @@ static Command command_for_key(App *app, XKeyEvent *event) {
     unsigned int state = event->state & ~ignored;
     for (int i = 0; i < app->binding_count; i++) {
         Binding *binding = &app->bindings[i];
+        if (binding->prefix_keycode) {
+            if (event->keycode == binding->prefix_keycode && state == binding->modifiers) {
+                binding->prefix_down = true;
+                return CMD_NONE;
+            }
+            if (binding->prefix_down &&
+                event->keycode == binding->keycode &&
+                state == binding->modifiers) {
+                binding->prefix_down = false;
+                return binding->command;
+            }
+            continue;
+        }
         if (event->keycode == binding->keycode && state == binding->modifiers) {
             return binding->command;
         }
     }
     return CMD_NONE;
+}
+
+static void release_key_for_bindings(App *app, XKeyEvent *event) {
+    for (int i = 0; i < app->binding_count; i++) {
+        Binding *binding = &app->bindings[i];
+        if (binding->prefix_keycode && event->keycode == binding->prefix_keycode) {
+            binding->prefix_down = false;
+        }
+    }
 }
 
 static int setup_socket(App *app) {
@@ -1484,17 +1723,20 @@ static void handle_client(App *app) {
 
     if (strcmp(buf, "status") == 0) {
         update_geometry(app);
+        const char *mode = mc_overlay_visible(&app->overlay) ? "center" : mode_name(app->current_mode);
         reply_fd(fd,
-                 "window=0x%lx frame=0x%lx mode=%s geometry=%ux%u+%d+%d backend=%s\n",
+                 "window=0x%lx frame=0x%lx overlay=0x%lx mode=%s geometry=%ux%u+%d+%d backend=%s\n",
                  app->target,
                  app->frame,
-                 mode_name(app->current_mode),
+                 mc_overlay_window(&app->overlay),
+                 mode,
                  app->last_w,
                  app->last_h,
                  app->last_x,
                  app->last_y,
                  app->config.backend == BACKEND_FRAME_DIRECT ? "frame-direct" : "ewmh");
     } else if (strcmp(buf, "rescan") == 0) {
+        hide_center_overlay(app);
         app->target = None;
         app->frame = None;
         bool ok = find_target_window(app);
@@ -1519,6 +1761,7 @@ static void clear_target(App *app) {
     if (app->target != None) {
         log_msg("window disappeared: 0x%lx", app->target);
     }
+    hide_center_overlay(app);
     app->target = None;
     app->frame = None;
     app->current_mode = MODE_UNKNOWN;
@@ -1526,6 +1769,11 @@ static void clear_target(App *app) {
 
 static void handle_x_event(App *app, XEvent *event) {
     switch (event->type) {
+    case Expose:
+        if (event->xexpose.window == mc_overlay_window(&app->overlay)) {
+            paint_center_overlay(app);
+        }
+        break;
     case KeyPress: {
         Command command = command_for_key(app, &event->xkey);
         if (command != CMD_NONE) {
@@ -1533,6 +1781,9 @@ static void handle_x_event(App *app, XEvent *event) {
         }
         break;
     }
+    case KeyRelease:
+        release_key_for_bindings(app, &event->xkey);
+        break;
     case MapNotify:
         if (app->target == None) {
             find_target_window(app);
@@ -1546,6 +1797,9 @@ static void handle_x_event(App *app, XEvent *event) {
     case ConfigureNotify:
         if (event->xconfigure.window == app->target || event->xconfigure.window == app->frame) {
             update_geometry(app);
+            if (mc_overlay_visible(&app->overlay)) {
+                paint_center_overlay(app);
+            }
         }
         break;
     case PropertyNotify:
@@ -1640,6 +1894,7 @@ int main(int argc, char **argv) {
     app.net_current_desktop = XInternAtom(app.display, "_NET_CURRENT_DESKTOP", False);
     app.net_wm_desktop = XInternAtom(app.display, "_NET_WM_DESKTOP", False);
     app.wm_state = XInternAtom(app.display, "WM_STATE", False);
+    mc_overlay_init(&app.overlay, app.display, app.screen, app.root);
 
     XSelectInput(app.display, app.root, SubstructureNotifyMask | PropertyChangeMask);
     setup_hotkeys(&app);
@@ -1649,7 +1904,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    log_msg("backend=%s monitor=%ux%u+%d+%d thin=%ux%u wide=%ux%u",
+    log_msg("backend=%s monitor=%ux%u+%d+%d thin=%ux%u wide=%ux%u center=%.3f",
             app.config.backend == BACKEND_FRAME_DIRECT ? "frame-direct" : "ewmh",
             app.config.monitor_w,
             app.config.monitor_h,
@@ -1658,7 +1913,8 @@ int main(int argc, char **argv) {
             app.config.thin_w,
             app.config.thin_h,
             app.config.wide_w,
-            app.config.wide_h);
+            app.config.wide_h,
+            app.config.measurement_center_screen);
 
     find_target_window(&app);
 
@@ -1671,6 +1927,12 @@ int main(int argc, char **argv) {
             handle_x_event(&app, &event);
         }
 
+        long now_ms = monotonic_ms();
+        if (mc_overlay_visible(&app.overlay) && now_ms >= app.next_overlay_paint_ms) {
+            paint_center_overlay(&app);
+            app.next_overlay_paint_ms = now_ms + 33;
+        }
+
         fd_set readfds;
         FD_ZERO(&readfds);
         FD_SET(xfd, &readfds);
@@ -1678,8 +1940,17 @@ int main(int argc, char **argv) {
         int maxfd = xfd > app.listen_fd ? xfd : app.listen_fd;
 
         struct timeval timeout;
-        timeout.tv_sec = 1;
-        timeout.tv_usec = 0;
+        long timeout_ms = 1000;
+        if (mc_overlay_visible(&app.overlay)) {
+            timeout_ms = app.next_overlay_paint_ms - monotonic_ms();
+            if (timeout_ms < 1) {
+                timeout_ms = 1;
+            } else if (timeout_ms > 33) {
+                timeout_ms = 33;
+            }
+        }
+        timeout.tv_sec = timeout_ms / 1000;
+        timeout.tv_usec = (timeout_ms % 1000) * 1000;
         int rc = select(maxfd + 1, &readfds, NULL, NULL, &timeout);
         if (rc < 0) {
             if (errno == EINTR) {
@@ -1713,6 +1984,7 @@ int main(int argc, char **argv) {
         close(app.listen_fd);
         unlink(app.config.socket_path);
     }
+    mc_overlay_destroy(&app.overlay);
     XCloseDisplay(app.display);
     log_msg("stopped");
     return 0;

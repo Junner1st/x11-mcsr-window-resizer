@@ -1,7 +1,7 @@
 # X11 MCSR Windows Resizer
 
 Low-latency X11 window resizer for switching a target window between fixed
-`thin`, `wide`, and `full` geometries.
+`thin`, `wide`, and `full` geometries, plus a centered measurement overlay.
 
 
 This is inspired by [linux-mcsr-resizer](https://github.com/nafetss/linux-mcsr-resizer) from [nafetss](https://github.com/nafetss). But instead of a shell script, this use systemctl service to improve performance and try to fix some bugs.
@@ -51,6 +51,7 @@ In another terminal:
 ./mc-resizerctl wide
 ./mc-resizerctl full
 ./mc-resizerctl cycle
+./mc-resizerctl center
 ```
 
 ## Commands
@@ -59,6 +60,7 @@ In another terminal:
 - `wide`
 - `full`
 - `cycle`
+- `center`
 - `status`
 - `rescan`
 - `quit`
@@ -68,5 +70,10 @@ In another terminal:
 `mc-resizerd` finds a matching X11 window, caches its id/geometry, and resizes
 it from hotkeys or socket commands.
 
-It does not read process memory, game state, logs, screen pixels, or generate
-keyboard/mouse input.
+The `key_measurement_screen_toggle` hotkey toggles the centered measurement
+overlay. `measurement_center_screen=0.3` samples the center 30 percent of the
+target window and magnifies it into a borderless, always-on-top, click-through
+X11 overlay fixed over the target.
+
+It does not read process memory, game state, logs, or generate keyboard/mouse
+input. The centered measurement overlay samples the target window through X11.

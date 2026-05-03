@@ -21,7 +21,7 @@ static void default_socket_path(char *out, size_t out_len) {
 
 static void usage(const char *argv0) {
     fprintf(stderr,
-            "Usage: %s [--socket PATH] thin|wide|full|cycle|status|rescan|quit\n",
+            "Usage: %s [--socket PATH] thin|wide|full|cycle|center|status|rescan|quit\n",
             argv0);
 }
 
