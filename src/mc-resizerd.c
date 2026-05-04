@@ -1821,7 +1821,7 @@ static void usage(const char *argv0) {
 }
 
 int main(int argc, char **argv) {
-    const char *config_path = "mc-resizer.conf";
+    const char *config_path = "config/mc-resizer.conf";
     char socket_override[UNIX_PATH_MAX] = "";
     int backend_override = -1;
     App app;

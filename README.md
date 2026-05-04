@@ -10,7 +10,7 @@ This is inspired by [linux-mcsr-resizer](https://github.com/nafetss/linux-mcsr-r
 ## Functions
 
 1. Centering
-    ![centering](./static/gif/centering.GIF)
+    ![centering](./docs/assets/centering.GIF)
 
 2. window resize: thin/wide mode
     > not yet clip
@@ -18,7 +18,7 @@ This is inspired by [linux-mcsr-resizer](https://github.com/nafetss/linux-mcsr-r
 
 ## Configure
 
-Edit `mc-resizer.conf`.
+Edit `config/mc-resizer.conf`.
 
 Common settings: monitor geometry, thin/wide size, hotkeys, `backend`, and
 `refresh`.
@@ -49,7 +49,7 @@ make
 ### Excution
 
 ```sh
-./mc-resizerd --config ./mc-resizer.conf --verbose
+./mc-resizerd --config ./config/mc-resizer.conf --verbose
 ```
 
 In another terminal:
