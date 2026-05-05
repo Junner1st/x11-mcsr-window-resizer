@@ -80,9 +80,10 @@ In another terminal:
 it from hotkeys or socket commands.
 
 The `key_measurement_screen_toggle` hotkey toggles the centered measurement
-overlay. `measurement_center_screen=0.3` samples the center 30 percent of the
-target window and magnifies it into a borderless, always-on-top, click-through
-X11 overlay fixed over the target.
+overlay. `measurement_center_screen` is a ratio of the target client window
+dimensions. For example, `measurement_center_screen=0.013` samples about
+25x14 pixels from a 1920x1080 target and magnifies that region into a
+borderless, always-on-top, click-through X11 overlay fixed over the target.
 
 It does not read process memory, game state, logs, or generate keyboard/mouse
 input. The centered measurement overlay samples the target window through X11.

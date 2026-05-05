@@ -16,7 +16,7 @@ INCLUDEDIR := include
 CONFIGSRC := config/mc-resizer.conf
 SERVICESRC := systemd/mc-resizerd.service
 
-.PHONY: all clean install install-service
+.PHONY: all clean install install-config install-service
 
 all: mc-resizerd mc-resizerctl
 
@@ -26,15 +26,19 @@ mc-resizerd: $(SRCDIR)/mc-resizerd.c $(SRCDIR)/mc-centering.c $(INCLUDEDIR)/mc-c
 mc-resizerctl: $(SRCDIR)/mc-resizerctl.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $<
 
-install: all
+install: all install-config
 	install -d "$(BINDIR)" "$(CONFIGDIR)"
 	install -m 0755 mc-resizerd mc-resizerctl "$(BINDIR)"
-	@if [ ! -f "$(CONFIGDIR)/config" ]; then install -m 0644 "$(CONFIGSRC)" "$(CONFIGDIR)/config"; fi
+
+install-config:
+	install -d "$(CONFIGDIR)"
+	install -m 0644 "$(CONFIGSRC)" "$(CONFIGDIR)/config"
 
 install-service: install
 	install -d "$(SYSTEMD_USER_DIR)"
 	install -m 0644 "$(SERVICESRC)" "$(SYSTEMD_USER_DIR)/mc-resizerd.service"
 	systemctl --user daemon-reload
+	systemctl --user try-restart mc-resizerd.service
 
 clean:
 	rm -f mc-resizerd mc-resizerctl

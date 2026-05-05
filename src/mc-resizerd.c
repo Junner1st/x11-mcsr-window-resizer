@@ -1724,8 +1724,21 @@ static void handle_client(App *app) {
     if (strcmp(buf, "status") == 0) {
         update_geometry(app);
         const char *mode = mc_overlay_visible(&app->overlay) ? "center" : mode_name(app->current_mode);
+        McCenteringRect source_rect = {0, 0, 0, 0};
+        XWindowAttributes attr;
+        if (app->target != None &&
+            XGetWindowAttributes(app->display, app->target, &attr) &&
+            attr.width > 0 &&
+            attr.height > 0) {
+            mc_centering_source_rect(0,
+                                     0,
+                                     (unsigned int)attr.width,
+                                     (unsigned int)attr.height,
+                                     app->config.measurement_center_screen,
+                                     &source_rect);
+        }
         reply_fd(fd,
-                 "window=0x%lx frame=0x%lx overlay=0x%lx mode=%s geometry=%ux%u+%d+%d backend=%s\n",
+                 "window=0x%lx frame=0x%lx overlay=0x%lx mode=%s geometry=%ux%u+%d+%d backend=%s center_ratio=%.6f center_source=%ux%u+%d+%d\n",
                  app->target,
                  app->frame,
                  mc_overlay_window(&app->overlay),
@@ -1734,7 +1747,12 @@ static void handle_client(App *app) {
                  app->last_h,
                  app->last_x,
                  app->last_y,
-                 app->config.backend == BACKEND_FRAME_DIRECT ? "frame-direct" : "ewmh");
+                 app->config.backend == BACKEND_FRAME_DIRECT ? "frame-direct" : "ewmh",
+                 app->config.measurement_center_screen,
+                 source_rect.w,
+                 source_rect.h,
+                 source_rect.x,
+                 source_rect.y);
     } else if (strcmp(buf, "rescan") == 0) {
         hide_center_overlay(app);
         app->target = None;
