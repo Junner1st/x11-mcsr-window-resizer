@@ -4,8 +4,8 @@ PKG_CONFIG ?= pkg-config
 CFLAGS ?= -O2 -Wall -Wextra -std=c11
 CPPFLAGS += -D_DEFAULT_SOURCE
 CPPFLAGS += -Iinclude
-LDLIBS_X11 := $(shell $(PKG_CONFIG) --libs x11 xext xrender 2>/dev/null || printf '%s\n' -lX11 -lXext -lXrender)
-CFLAGS_X11 := $(shell $(PKG_CONFIG) --cflags x11 xext xrender 2>/dev/null)
+LDLIBS_X11 := $(shell $(PKG_CONFIG) --libs x11 xext xrender xtst 2>/dev/null || printf '%s\n' -lX11 -lXext -lXrender -lXtst)
+CFLAGS_X11 := $(shell $(PKG_CONFIG) --cflags x11 xext xrender xtst 2>/dev/null)
 
 PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin

@@ -1,6 +1,7 @@
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <X11/extensions/XTest.h>
 #include <X11/keysym.h>
 #include "mc-centering.h"
 #include "mc-overlay.h"
@@ -28,7 +29,6 @@
 #define MAX_PATTERNS 16
 #define MAX_BINDINGS 5
 #define GEOMETRY_TOLERANCE 80
-
 typedef enum {
     MODE_UNKNOWN = 0,
     MODE_FULL,
@@ -110,6 +110,8 @@ typedef struct {
     Atom net_wm_state;
     Atom net_wm_state_fullscreen;
     Atom net_wm_state_hidden;
+    Atom net_wm_state_maximized_horz;
+    Atom net_wm_state_maximized_vert;
     Atom net_active_window;
     Atom net_moveresize_window;
     Atom net_current_desktop;
@@ -122,6 +124,7 @@ typedef struct {
     int listen_fd;
     McOverlay overlay;
     long next_overlay_paint_ms;
+    bool xtest_available;
     bool verbose;
     int x_error_count;
 } App;
@@ -846,6 +849,29 @@ static bool remove_fullscreen(App *app) {
                       &ev) != 0;
 }
 
+static bool remove_maximized(App *app) {
+    XEvent ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.xclient.type = ClientMessage;
+    ev.xclient.serial = 0;
+    ev.xclient.send_event = True;
+    ev.xclient.display = app->display;
+    ev.xclient.window = app->target;
+    ev.xclient.message_type = app->net_wm_state;
+    ev.xclient.format = 32;
+    ev.xclient.data.l[0] = 0; /* _NET_WM_STATE_REMOVE */
+    ev.xclient.data.l[1] = (long)app->net_wm_state_maximized_horz;
+    ev.xclient.data.l[2] = (long)app->net_wm_state_maximized_vert;
+    ev.xclient.data.l[3] = 1; /* application source indication */
+    ev.xclient.data.l[4] = 0;
+
+    return XSendEvent(app->display,
+                      app->root,
+                      False,
+                      SubstructureRedirectMask | SubstructureNotifyMask,
+                      &ev) != 0;
+}
+
 static bool activate_window(App *app, Window window) {
     if (window == None) {
         return false;
@@ -1029,6 +1055,34 @@ static void wait_for_fullscreen_removed(App *app) {
                                       app->target,
                                       app->net_wm_state,
                                       app->net_wm_state_fullscreen)) {
+            return;
+        }
+        sleep_ms(1);
+    }
+}
+
+static void wait_for_maximized_removed(App *app) {
+    int timeout = app->config.settle_timeout_ms;
+    if (timeout <= 0) {
+        return;
+    }
+
+    long deadline = monotonic_ms() + timeout;
+    while (monotonic_ms() < deadline) {
+        while (XPending(app->display)) {
+            XEvent event;
+            XNextEvent(app->display, &event);
+            handle_x_event(app, &event);
+        }
+        bool horz = window_has_atom_property(app,
+                                             app->target,
+                                             app->net_wm_state,
+                                             app->net_wm_state_maximized_horz);
+        bool vert = window_has_atom_property(app,
+                                             app->target,
+                                             app->net_wm_state,
+                                             app->net_wm_state_maximized_vert);
+        if (!horz && !vert) {
             return;
         }
         sleep_ms(1);
@@ -1335,8 +1389,10 @@ static bool set_mode(App *app, Mode mode) {
 
     if (mode != MODE_FULL) {
         remove_fullscreen(app);
+        remove_maximized(app);
         XFlush(app->display);
         wait_for_fullscreen_removed(app);
+        wait_for_maximized_removed(app);
     }
 
     bool ok = resize_window(app, x, y, w, h);
@@ -1346,8 +1402,10 @@ static bool set_mode(App *app, Mode mode) {
         wait_for_resize_settle(app, w, h);
         if (mode != MODE_FULL) {
             remove_fullscreen(app);
+            remove_maximized(app);
             XFlush(app->display);
             wait_for_fullscreen_removed(app);
+            wait_for_maximized_removed(app);
         }
         post_resize_refresh(app);
         activate_window(app, app->target);
@@ -1550,6 +1608,40 @@ static void grab_one(Display *display, Window root, KeyCode keycode, unsigned in
     XGrabKey(display, (int)keycode, modifiers, root, False, GrabModeAsync, GrabModeAsync);
 }
 
+static KeyCode grab_keycode_for_binding(const Binding *binding) {
+    return binding->prefix_keycode ? binding->prefix_keycode : binding->keycode;
+}
+
+static void binding_modifier_variants(const App *app, unsigned int *variants, size_t *count) {
+    variants[0] = 0;
+    variants[1] = LockMask;
+    variants[2] = app->numlock_mask;
+    variants[3] = LockMask | app->numlock_mask;
+    *count = 4;
+}
+
+static void ungrab_binding_key(App *app, Binding *binding) {
+    unsigned int variants[4];
+    size_t variant_count = 0;
+    binding_modifier_variants(app, variants, &variant_count);
+    KeyCode keycode = grab_keycode_for_binding(binding);
+
+    for (size_t i = 0; i < variant_count; i++) {
+        XUngrabKey(app->display, (int)keycode, binding->modifiers | variants[i], app->root);
+    }
+}
+
+static void regrab_binding_key(App *app, Binding *binding) {
+    unsigned int variants[4];
+    size_t variant_count = 0;
+    binding_modifier_variants(app, variants, &variant_count);
+    KeyCode keycode = grab_keycode_for_binding(binding);
+
+    for (size_t i = 0; i < variant_count; i++) {
+        grab_one(app->display, app->root, keycode, binding->modifiers | variants[i]);
+    }
+}
+
 static void add_binding(App *app, const char *name, Command command, const char *spec) {
     if (app->binding_count >= MAX_BINDINGS || !spec || !spec[0]) {
         return;
@@ -1569,15 +1661,12 @@ static void add_binding(App *app, const char *name, Command command, const char 
         return;
     }
 
-    unsigned int variants[] = {
-        0,
-        LockMask,
-        app->numlock_mask,
-        LockMask | app->numlock_mask,
-    };
-    for (size_t i = 0; i < sizeof(variants) / sizeof(variants[0]); i++) {
+    unsigned int variants[4];
+    size_t variant_count = 0;
+    binding_modifier_variants(app, variants, &variant_count);
+    for (size_t i = 0; i < variant_count; i++) {
         int before = app->x_error_count;
-        KeyCode grab_keycode = binding->prefix_keycode ? binding->prefix_keycode : binding->keycode;
+        KeyCode grab_keycode = grab_keycode_for_binding(binding);
         grab_one(app->display, app->root, grab_keycode, binding->modifiers | variants[i]);
         XSync(app->display, False);
         if (app->x_error_count != before) {
@@ -1628,10 +1717,28 @@ static Command command_for_key(App *app, XKeyEvent *event) {
     return CMD_NONE;
 }
 
+static void replay_prefix_key(App *app, Binding *binding) {
+    if (!app->xtest_available) {
+        log_msg("cannot replay prefix key for %s; XTest extension is unavailable", binding->spec);
+        return;
+    }
+
+    ungrab_binding_key(app, binding);
+    XSync(app->display, False);
+    XTestFakeKeyEvent(app->display, binding->prefix_keycode, True, CurrentTime);
+    XTestFakeKeyEvent(app->display, binding->prefix_keycode, False, CurrentTime);
+    XSync(app->display, False);
+    regrab_binding_key(app, binding);
+    XSync(app->display, False);
+}
+
 static void release_key_for_bindings(App *app, XKeyEvent *event) {
     for (int i = 0; i < app->binding_count; i++) {
         Binding *binding = &app->bindings[i];
         if (binding->prefix_keycode && event->keycode == binding->prefix_keycode) {
+            if (binding->prefix_down) {
+                replay_prefix_key(app, binding);
+            }
             binding->prefix_down = false;
         }
     }
@@ -1899,6 +2006,19 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    int xtest_event_base = 0;
+    int xtest_error_base = 0;
+    int xtest_major = 0;
+    int xtest_minor = 0;
+    app.xtest_available = XTestQueryExtension(app.display,
+                                              &xtest_event_base,
+                                              &xtest_error_base,
+                                              &xtest_major,
+                                              &xtest_minor);
+    if (!app.xtest_available) {
+        log_msg("XTest extension is unavailable; prefix-only hotkeys cannot be replayed");
+    }
+
     app.screen = DefaultScreen(app.display);
     app.root = RootWindow(app.display, app.screen);
     app.net_client_list = XInternAtom(app.display, "_NET_CLIENT_LIST", False);
@@ -1907,6 +2027,8 @@ int main(int argc, char **argv) {
     app.net_wm_state = XInternAtom(app.display, "_NET_WM_STATE", False);
     app.net_wm_state_fullscreen = XInternAtom(app.display, "_NET_WM_STATE_FULLSCREEN", False);
     app.net_wm_state_hidden = XInternAtom(app.display, "_NET_WM_STATE_HIDDEN", False);
+    app.net_wm_state_maximized_horz = XInternAtom(app.display, "_NET_WM_STATE_MAXIMIZED_HORZ", False);
+    app.net_wm_state_maximized_vert = XInternAtom(app.display, "_NET_WM_STATE_MAXIMIZED_VERT", False);
     app.net_active_window = XInternAtom(app.display, "_NET_ACTIVE_WINDOW", False);
     app.net_moveresize_window = XInternAtom(app.display, "_NET_MOVERESIZE_WINDOW", False);
     app.net_current_desktop = XInternAtom(app.display, "_NET_CURRENT_DESKTOP", False);
